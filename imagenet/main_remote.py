@@ -19,9 +19,13 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+import grpc
+
+from grpc_gen import example_meta_pb2, example_meta_pb2_grpc
+
 model_names = sorted(name for name in models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(models.__dict__[name]))
+                     if name.islower() and not name.startswith("__")
+                     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -29,8 +33,8 @@ parser.add_argument('data', metavar='DIR',
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
-                        ' | '.join(model_names) +
-                        ' (default: resnet18)')
+                         ' | '.join(model_names) +
+                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -74,8 +78,50 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
-
+# parser.add_argument('--server-host', default='127.0.0.1', type=str, help='server host')
 best_acc1 = 0
+
+server_host = "127.0.0.1"
+port = 7890
+
+uuid = os.environ["JOB_UUID"]
+print("uuid: %s" % uuid)
+
+server_address = "%s:%d" % (server_host, port)
+channel = grpc.insecure_channel(server_address)
+stub = example_meta_pb2_grpc.DatasetServiceStub(channel)
+register_response = stub.Register(example_meta_pb2.RegisterRequest(uuid=uuid))
+print(register_response)
+
+example_paths = []
+idx = 0
+
+
+def path_reader(uuid):
+    global example_paths
+    global idx
+
+    if example_paths is None or len(example_paths[idx:]) == 0:
+        example_req = example_meta_pb2.ExampleRequest(num=2048, worker_rank=0, uuid=uuid)
+        example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]
+        idx = 0
+
+    ret = example_paths[idx]
+    idx += 1
+    return os.path.join('/data/', ret)
+
+default_path_reader = path_reader
+
+
+class ImageNetDataset(datasets.RemoteImageFolder):
+    def __init__(self, root, transform=None, target_transform=None, uuid=None):
+        super().__init__(root, transform, target_transform, uuid=uuid)
+        # self.server_address = "%s:%d" % (server_host, port)
+        # self.channel = grpc.insecure_channel(self.server_address)
+        # self.stub = example_meta_pb2_grpc.DatasetServiceStub(self.channel)
+
+    def get_path_reader(self):
+        return default_path_reader
 
 
 def main():
@@ -206,14 +252,25 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_dataset = datasets.ImageFolder(
+    train_dataset = ImageNetDataset(
         traindir,
         transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
-        ]))
+        ]),
+        uuid=uuid,
+    )
+
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     transforms.Compose([
+    #         transforms.RandomResizedCrop(224),
+    #         transforms.RandomHorizontalFlip(),
+    #         transforms.ToTensor(),
+    #         normalize,
+    #     ]))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -256,13 +313,13 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(acc1, best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+                                                    and args.rank % ngpus_per_node == 0):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
+                'optimizer': optimizer.state_dict(),
             }, is_best)
 
 
@@ -366,6 +423,7 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+
     def __init__(self, name, fmt=':f'):
         self.name = name
         self.fmt = fmt
