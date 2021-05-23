@@ -78,6 +78,29 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 best_acc1 = 0
 
 
+class MyImageFolder(datasets.ImageFolder):
+
+    def __init__(self, root, transform=None, target_transform=None, is_valid_file=None):
+        # self.dataload_time = AverageMeter('Data Load', ':5.3f')
+        # self.transform_time = AverageMeter('Transform', ':5.3f')
+        super().__init__(root, transform, target_transform)
+
+    def __getitem__(self, index):
+        # dataload_start = time.time()
+        path, target = self.samples[index]
+        sample = self.loader(path)
+        # self.dataload_time.update(time.time() - dataload_start)
+
+        # transform_start = time.time()
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        # self.transform_time.update(time.time() - transform_start)
+        return sample, target
+
+
 def main():
     args = parser.parse_args()
 
@@ -206,7 +229,8 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_dataset = datasets.ImageFolder(
+    # train_dataset = datasets.ImageFolder(
+    train_dataset = MyImageFolder(
         traindir,
         transforms.Compose([
             transforms.RandomResizedCrop(224),
@@ -272,9 +296,13 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+
+    model_time = AverageMeter('Forward', ':5.3f')
+    backward_time = AverageMeter('Backward', ':6.3f')
+
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, model_time, backward_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -291,8 +319,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             target = target.cuda(args.gpu, non_blocking=True)
 
         # compute output
+        model_start = time.time()
         output = model(images)
         loss = criterion(output, target)
+        model_time.update(time.time() - model_start)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -301,9 +331,11 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         top5.update(acc5[0], images.size(0))
 
         # compute gradient and do SGD step
+        backward_start = time.time()
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        backward_time.update(time.time() - backward_start)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
