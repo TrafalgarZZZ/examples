@@ -96,6 +96,8 @@ print(register_response)
 example_paths = []
 idx = 0
 
+args = parser.parse_args()
+reader_batch_size = int(args.batch_size / torch.cuda.device_count())
 
 def path_reader(uuid):
     global example_paths
@@ -103,9 +105,8 @@ def path_reader(uuid):
 
     if example_paths is None or len(example_paths[idx:]) == 0:
         start_time = time.time()
-        example_req = example_meta_pb2.ExampleRequest(num=2048, worker_rank=0, uuid=uuid)
-        example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]
-        idx = 0
+        example_req = example_meta_pb2.ExampleRequest(num=reader_batch_size, worker_rank=0, uuid=uuid)
+        example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]; idx = 0
         print("rpc took %d" % (time.time() - start_time))
 
     ret = example_paths[idx]
@@ -127,7 +128,6 @@ class ImageNetDataset(datasets.RemoteImageFolder):
 
 
 def main():
-    args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -340,7 +340,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
-    for i, (images, target) in enumerate(tqdm(train_loader)):
+    # for i, (images, target) in enumerate(tqdm(train_loader)):
+    for i, (images, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
