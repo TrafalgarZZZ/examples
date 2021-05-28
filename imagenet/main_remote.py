@@ -106,10 +106,11 @@ def path_reader(uuid):
     global idx
 
     if example_paths is None or len(example_paths[idx:]) == 0:
-        start_time = time.time()
-        example_req = example_meta_pb2.ExampleRequest(num=reader_batch_size, worker_rank=0, uuid=uuid)
+        start_time = int(time.time() * 1000)
+        example_req = example_meta_pb2.ExampleRequest(num=2048, worker_rank=0, uuid=uuid)
         example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]; idx = 0
-        print("rpc took %d" % (time.time() - start_time))
+        end_time = int(time.time() * 1000)
+        print("rpc took %d ms" % (end_time - start_time))
 
     ret = example_paths[idx]
     idx += 1
