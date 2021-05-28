@@ -19,6 +19,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+from subprocess import Popen
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -74,6 +76,7 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--track-cache-usage', action='store_true', help='to enable track cache usage')
 
 best_acc1 = 0
 
@@ -289,6 +292,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
 
+def track_cache_usage(i):
+    p = Popen(['bash', '/logs/log_collector.sh', str(i)])
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -340,6 +345,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+
+        if args.gpu == 0 and args.track_cache_usage:
+            track_cache_usage(i)
 
         if i % args.print_freq == 0:
             progress.display(i)
