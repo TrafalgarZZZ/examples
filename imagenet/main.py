@@ -272,7 +272,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, epoch, args, start_train_time)
         print("Training time:", time.time() - start_train_time)
 
         # evaluate on validation set
@@ -295,19 +295,20 @@ def main_worker(gpu, ngpus_per_node, args):
 def track_cache_usage(i):
     p = Popen(['bash', '/logs/log_collector.sh', str(i)])
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, criterion, optimizer, epoch, args, start_train_time):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+    images_speed = SpeedMeter('Images/sec', ':6.3f')
 
-    model_time = AverageMeter('Forward', ':5.3f')
-    backward_time = AverageMeter('Backward', ':6.3f')
+    # model_time = AverageMeter('Forward', ':5.3f')
+    # backward_time = AverageMeter('Backward', ':6.3f')
 
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, model_time, backward_time, losses, top1, top5],
+        [batch_time, data_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -327,7 +328,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         model_start = time.time()
         output = model(images)
         loss = criterion(output, target)
-        model_time.update(time.time() - model_start)
+        # model_time.update(time.time() - model_start)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -340,11 +341,18 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        backward_time.update(time.time() - backward_start)
+        # backward_time.update(time.time() - backward_start)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+
+        if args.gpu == 0:
+            images_speed.update(images.size(0) * args.world_size)
+            # if (i + 1) % 8 == 0:
+            if i % args.print_freq == 0:
+                print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
+            # images_speed.reset()
 
         if args.gpu == 0 and args.track_cache_usage:
             track_cache_usage(i)
@@ -403,6 +411,28 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
 
+class SpeedMeter(object):
+    """"Computes and store the speed of some process"""
+
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.start_time = time.time()
+        self.sum = 0
+        self.speed = 0
+
+    def reset(self):
+        self.sum = 0
+        self.start_time = time.time()
+        self.speed = 0
+
+    def update(self, val):
+        self.sum += val
+        self.speed = self.sum / (time.time() - self.start_time)
+
+    def __str__(self):
+        fmtstr = '{name} {speed' + self.fmt + '}'
+        return fmtstr.format(**self.__dict__)
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -426,7 +456,6 @@ class AverageMeter(object):
     def __str__(self):
         fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
         return fmtstr.format(**self.__dict__)
-
 
 class ProgressMeter(object):
     def __init__(self, num_batches, meters, prefix=""):
