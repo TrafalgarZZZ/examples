@@ -76,6 +76,7 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--prefetch-factor', default=2, type=int, help='The prefetch factor the dataloader will use')
 parser.add_argument('--track-cache-usage', action='store_true', help='to enable track cache usage')
 
 best_acc1 = 0
@@ -249,7 +250,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler, prefetch_factor=args.prefetch_factor)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
@@ -350,9 +351,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
         if args.gpu == 0:
             images_speed.update(images.size(0) * args.world_size)
             # if (i + 1) % 8 == 0:
-            if i % args.print_freq == 0:
-                print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
-            # images_speed.reset()
+            # if i % args.print_freq == 0:
+            print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
+            images_speed.reset()
 
         if args.gpu == 0 and args.track_cache_usage:
             track_cache_usage(i)
