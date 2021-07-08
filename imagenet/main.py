@@ -105,6 +105,8 @@ class MyImageFolder(datasets.ImageFolder):
 
 
 def main():
+    print(">>>>> Process started at:")
+    print(time.strftime("%H:%M:%S"))
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -137,6 +139,9 @@ def main():
     else:
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
+
+    print(">>>>>> Process ended at:")
+    print(time.strftime("%H:%M:%S"))
 
 
 def main_worker(gpu, ngpus_per_node, args):
@@ -243,7 +248,8 @@ def main_worker(gpu, ngpus_per_node, args):
         ]))
 
     if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        # Random Shuffle Support
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, seed=random.randint(0, 1000))
     else:
         train_sampler = None
 
@@ -277,6 +283,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, args)
+        print("Epoch time:", time.time() - start_train_time)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -316,6 +323,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
 
     end = time.time()
     for i, (images, target) in enumerate(tqdm(train_loader)):
+        if i == 0:
+            print(list(target))
         # measure data loading time
         data_time.update(time.time() - end)
 
