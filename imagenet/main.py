@@ -22,8 +22,8 @@ import torchvision.models as models
 from subprocess import Popen
 
 model_names = sorted(name for name in models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(models.__dict__[name]))
+                     if name.islower() and not name.startswith("__")
+                     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -31,8 +31,8 @@ parser.add_argument('data', metavar='DIR',
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' +
-                        ' | '.join(model_names) +
-                        ' (default: resnet18)')
+                         ' | '.join(model_names) +
+                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -81,27 +81,129 @@ parser.add_argument('--track-cache-usage', action='store_true', help='to enable 
 
 best_acc1 = 0
 
+class StepMeter(object):
+    def __init__(self, name, fmt=":f"):
+        self.name = name
+        self.fmt = fmt
+        self.sum = 0.0
+        self.avg = 0.0
+        self.count = 0
+
+    def add(self, val):
+        self.sum += val
+
+    def update(self):
+        self.count += 1
+        self.avg = self.sum * 1.0 / self.count
+        print("%s: %.5f(%d)" % (self.name, self.avg, self.count))
+
+    def __str__(self):
+        fmtstr = '{name} {sum' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+
+
+class SpeedMeter(object):
+    """"Computes and store the speed of some process"""
+
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.start_time = time.time()
+        self.sum = 0
+        self.speed = 0
+
+    def reset(self):
+        self.sum = 0
+        self.start_time = time.time()
+        self.speed = 0
+
+    def update(self, val):
+        self.sum += val
+        self.speed = self.sum / (time.time() - self.start_time)
+
+    def __str__(self):
+        fmtstr = '{name} {speed' + self.fmt + '}'
+        return fmtstr.format(**self.__dict__)
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+
+
+class ProgressMeter(object):
+    def __init__(self, num_batches, meters, prefix=""):
+        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
+        self.meters = meters
+        self.prefix = prefix
+
+    def display(self, batch):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        entries += [str(meter) for meter in self.meters]
+        print('\t'.join(entries))
+
+    def _get_batch_fmtstr(self, num_batches):
+        num_digits = len(str(num_batches // 1))
+        fmt = '{:' + str(num_digits) + 'd}'
+        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+
+
+# dataload_time = StepMeter('Data Load', ':.8f')
+# transform_time = StepMeter('Transform', ':.8f')
+
 
 class MyImageFolder(datasets.ImageFolder):
 
     def __init__(self, root, transform=None, target_transform=None, is_valid_file=None):
-        # self.dataload_time = AverageMeter('Data Load', ':5.3f')
-        # self.transform_time = AverageMeter('Transform', ':5.3f')
+        self.dataload_time = StepMeter('Data Load', ':5.3f')
+        self.transform_time = StepMeter('Transform', ':5.3f')
+        self.count = 0
         super().__init__(root, transform, target_transform)
 
     def __getitem__(self, index):
-        # dataload_start = time.time()
+        dataload_start = time.time()
         path, target = self.samples[index]
         sample = self.loader(path)
-        # self.dataload_time.update(time.time() - dataload_start)
+        tmp_time = time.time() - dataload_start
+        # print(tmp_time)
+        self.dataload_time.add(tmp_time)
 
-        # transform_start = time.time()
+        transform_start = time.time()
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        # self.transform_time.update(time.time() - transform_start)
+        tmp_time = time.time() - transform_start
+        # print(tmp_time)
+        self.transform_time.add(tmp_time)
+
+        if self.count % 64 == 0:
+            self.dataload_time.update()
+            self.transform_time.update()
+
+        self.count += 1
+
         return sample, target
 
 
@@ -256,7 +358,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, prefetch_factor=args.prefetch_factor)
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
@@ -291,17 +393,19 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(acc1, best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+                                                    and args.rank % ngpus_per_node == 0):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
+                'optimizer': optimizer.state_dict(),
             }, is_best)
+
 
 def track_cache_usage(i):
     p = Popen(['bash', '/logs/log_collector.sh', str(i)])
+
 
 def train(train_loader, model, criterion, optimizer, epoch, args, start_train_time):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -310,6 +414,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
     images_speed = SpeedMeter('Images/sec', ':6.3f')
+
+    gpu_transmission = StepMeter('GPU Transmission', ':.5f')
+    gpu_time = StepMeter('GPU', ':.5f')
 
     # model_time = AverageMeter('Forward', ':5.3f')
     # backward_time = AverageMeter('Backward', ':6.3f')
@@ -329,16 +436,20 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
         # measure data loading time
         data_time.update(time.time() - end)
 
+        gpu_transmission_start = time.time()
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
         if torch.cuda.is_available():
             target = target.cuda(args.gpu, non_blocking=True)
+        gpu_transmission.add(time.time() - gpu_transmission_start)
+        gpu_transmission.update()
 
         # compute output
         model_start = time.time()
         output = model(images)
         loss = criterion(output, target)
-        # model_time.update(time.time() - model_start)
+        gpu_time.add(time.time() - model_start)
+        gpu_time.update()
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -356,6 +467,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+
+        # dataload_time.update()
+        # transform_time.update()
 
         if args.gpu == 0:
             images_speed.update(images.size(0) * args.world_size)
@@ -420,68 +534,6 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
-
-class SpeedMeter(object):
-    """"Computes and store the speed of some process"""
-
-    def __init__(self, name, fmt=':f'):
-        self.name = name
-        self.fmt = fmt
-        self.start_time = time.time()
-        self.sum = 0
-        self.speed = 0
-
-    def reset(self):
-        self.sum = 0
-        self.start_time = time.time()
-        self.speed = 0
-
-    def update(self, val):
-        self.sum += val
-        self.speed = self.sum / (time.time() - self.start_time)
-
-    def __str__(self):
-        fmtstr = '{name} {speed' + self.fmt + '}'
-        return fmtstr.format(**self.__dict__)
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self, name, fmt=':f'):
-        self.name = name
-        self.fmt = fmt
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
-        return fmtstr.format(**self.__dict__)
-
-class ProgressMeter(object):
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters = meters
-        self.prefix = prefix
-
-    def display(self, batch):
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches // 1))
-        fmt = '{:' + str(num_digits) + 'd}'
-        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 
 def adjust_learning_rate(optimizer, epoch, args):
