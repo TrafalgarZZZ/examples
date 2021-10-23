@@ -198,7 +198,7 @@ class MyImageFolder(datasets.ImageFolder):
         # print(tmp_time)
         self.transform_time.add(tmp_time)
 
-        if self.count % 64 == 0:
+        if self.count % 128 == 0:
             self.dataload_time.update()
             self.transform_time.update()
 

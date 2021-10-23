@@ -99,7 +99,8 @@ example_paths = []
 idx = 0
 
 args = parser.parse_args()
-reader_batch_size = int(args.batch_size / torch.cuda.device_count())
+# reader_batch_size = int(args.batch_size / torch.cuda.device_count())
+reader_batch_size = 16
 
 def path_reader(uuid):
     global example_paths

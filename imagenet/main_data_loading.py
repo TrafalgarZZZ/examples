@@ -4,7 +4,6 @@ import random
 import shutil
 import time
 import warnings
-from typing import Optional, Callable, Any, Iterable, Mapping
 
 from tqdm import tqdm
 import torch
@@ -20,10 +19,7 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
-import grpc
 from subprocess import Popen
-
-from grpc_gen import example_meta_pb2, example_meta_pb2_grpc
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
@@ -80,82 +76,144 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--prefetch-factor', default=2, type=int, help='The prefetch factor the dataloader will use')
 parser.add_argument('--track-cache-usage', action='store_true', help='to enable track cache usage')
-# parser.add_argument('--server-host', default='127.0.0.1', type=str, help='server host')
+
 best_acc1 = 0
 
-server_host = "127.0.0.1"
-# server_host = "172.16.0.83"
-port = 7890
+class StepMeter(object):
+    def __init__(self, name, fmt=":f"):
+        self.name = name
+        self.fmt = fmt
+        self.sum = 0.0
+        self.avg = 0.0
+        self.count = 0
 
-uuid = os.environ["JOB_UUID"]
-print("uuid: %s" % uuid)
+    def add(self, val):
+        self.sum += val
 
-server_address = "%s:%d" % (server_host, port)
-channel = grpc.insecure_channel(server_address)
-stub = example_meta_pb2_grpc.DatasetServiceStub(channel)
-register_response = stub.Register(example_meta_pb2.RegisterRequest(uuid=uuid))
-print(register_response)
+    def update(self):
+        self.count += 1
+        self.avg = self.sum * 1.0 / self.count
+        print("%s: %.5f(%d)" % (self.name, self.avg, self.count))
 
-example_paths = []
-idx = 0
-aggregation = -1
-
-args = parser.parse_args()
-reader_batch_size = int(args.batch_size / torch.cuda.device_count())
-
-# import threading
-
-# class SpeedProfilerThread(threading.Thread):
-#
-#     def __init__(self) -> None:
-#         threading.Thread.__init__(self)
-#         # super().__init__(self, group=None)
-#
-#     def run(self) -> None:
-#         global aggregation
-#         global idx
-#         start_time = time.time()
-#         while True:
-#             now = time.time()
-#             print(">>>>> Processed %d images, time: %f" % (aggregation * reader_batch_size + idx, now - start_time))
-#             time.sleep(1)
+    def __str__(self):
+        fmtstr = '{name} {sum' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
 
 
-def path_reader(uuid):
-    global example_paths
-    global idx
-    global aggregation
+class SpeedMeter(object):
+    """"Computes and store the speed of some process"""
 
-    if example_paths is None or len(example_paths[idx:]) == 0:
-        # start_time = int(time.time() * 1000)
-        example_req = example_meta_pb2.ExampleRequest(num=reader_batch_size, worker_rank=0, uuid=uuid)
-        example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]
-        idx = 0
-        aggregation += 1
-        # end_time = int(time.time() * 1000)
-        # print("rpc took %d ms" % (end_time - start_time))
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.start_time = time.time()
+        self.sum = 0
+        self.speed = 0
 
-    ret = example_paths[idx]
-    idx += 1
-    return os.path.join('/data/', ret)
+    def reset(self):
+        self.sum = 0
+        self.start_time = time.time()
+        self.speed = 0
+
+    def update(self, val):
+        self.sum += val
+        self.speed = self.sum / (time.time() - self.start_time)
+
+    def __str__(self):
+        fmtstr = '{name} {speed' + self.fmt + '}'
+        return fmtstr.format(**self.__dict__)
 
 
-default_path_reader = path_reader
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
 
 
-class ImageNetDataset(datasets.RemoteImageFolder):
-    def __init__(self, root, transform=None, target_transform=None, uuid=None):
-        super().__init__(root, transform, target_transform, uuid=uuid)
-        # self.server_address = "%s:%d" % (server_host, port)
-        # self.channel = grpc.insecure_channel(self.server_address)
-        # self.stub = example_meta_pb2_grpc.DatasetServiceStub(self.channel)
+class ProgressMeter(object):
+    def __init__(self, num_batches, meters, prefix=""):
+        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
+        self.meters = meters
+        self.prefix = prefix
 
-    def get_path_reader(self):
-        return default_path_reader
+    def display(self, batch):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        entries += [str(meter) for meter in self.meters]
+        print('\t'.join(entries))
+
+    def _get_batch_fmtstr(self, num_batches):
+        num_digits = len(str(num_batches // 1))
+        fmt = '{:' + str(num_digits) + 'd}'
+        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+
+
+# dataload_time = StepMeter('Data Load', ':.8f')
+# transform_time = StepMeter('Transform', ':.8f')
+
+
+class MyImageFolder(datasets.ImageFolder):
+
+    def __init__(self, root, transform=None, target_transform=None, is_valid_file=None):
+        # self.dataload_time = StepMeter('Data Load', ':5.3f')
+        self.transform_time = StepMeter('Transform', ':5.3f')
+        self.count = 0
+        super().__init__(root, transform, target_transform)
+
+    def __getitem__(self, index):
+        # dataload_start = time.time()
+        path, target = self.samples[index]
+        sample = self.loader(path)
+        # tmp_time = time.time() - dataload_start
+        # print(tmp_time)
+        # self.dataload_time.add(tmp_time)
+
+        transform_start = time.time()
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        tmp_time = time.time() - transform_start
+        # print(tmp_time)
+        if self.count % 128 == 0:
+            self.transform_time.add(tmp_time * 128)
+            self.transform_time.update()
+
+        # if self.count % 128 == 0:
+        #     self.dataload_time.update()
+        #     self.transform_time.update()
+        #
+        self.count += 1
+
+        return sample, target
 
 
 def main():
+    print(">>>>> Process started at:")
+    print(time.strftime("%H:%M:%S"))
+    args = parser.parse_args()
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -175,9 +233,6 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    # profileThread = SpeedProfilerThread()
-    # profileThread.start()
-
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
@@ -189,6 +244,9 @@ def main():
     else:
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
+
+    print(">>>>>> Process ended at:")
+    print(time.strftime("%H:%M:%S"))
 
 
 def main_worker(gpu, ngpus_per_node, args):
@@ -284,28 +342,20 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_dataset = ImageNetDataset(
+    # train_dataset = datasets.ImageFolder(
+    train_dataset = MyImageFolder(
         traindir,
         transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
-        ]),
-        uuid=uuid,
+        ])
     )
 
-    # train_dataset = datasets.ImageFolder(
-    #     traindir,
-    #     transforms.Compose([
-    #         transforms.RandomResizedCrop(224),
-    #         transforms.RandomHorizontalFlip(),
-    #         transforms.ToTensor(),
-    #         normalize,
-    #     ]))
-
     if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        # Random Shuffle Support
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, seed=random.randint(0, 1000))
     else:
         train_sampler = None
 
@@ -339,6 +389,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, args)
+        print("Epoch time:", time.time() - start_train_time)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -360,14 +411,19 @@ def track_cache_usage(i):
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args, start_train_time):
-    ngpus_per_node = torch.cuda.device_count()
-
-    images_speed = SpeedMeter('Images/sec', ':6.3f')
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+    images_speed = SpeedMeter('Images/sec', ':6.3f')
+
+    gpu_transmission = StepMeter('GPU Transmission', ':.5f')
+    gpu_time = StepMeter('GPU', ':.5f')
+
+    # model_time = AverageMeter('Forward', ':5.3f')
+    # backward_time = AverageMeter('Backward', ':6.3f')
+
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses, top1, top5],
@@ -377,44 +433,55 @@ def train(train_loader, model, criterion, optimizer, epoch, args, start_train_ti
     model.train()
 
     end = time.time()
-    # for i, (images, target) in enumerate(tqdm(train_loader)):
-    for i, (images, target) in enumerate(train_loader):
+    for i, _ in enumerate(tqdm(train_loader)):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        if args.gpu is not None:
-            images = images.cuda(args.gpu, non_blocking=True)
-        if torch.cuda.is_available():
-            target = target.cuda(args.gpu, non_blocking=True)
-
-        # compute output
-        output = model(images)
-        loss = criterion(output, target)
-
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
+        time.sleep(0.3)
+        # gpu_transmission_start = time.time()
+        # if args.gpu is not None:
+        #     images = images.cuda(args.gpu, non_blocking=True)
+        # if torch.cuda.is_available():
+        #     target = target.cuda(args.gpu, non_blocking=True)
+        # gpu_transmission.add(time.time() - gpu_transmission_start)
+        # gpu_transmission.update()
+        #
+        # # compute output
+        # model_start = time.time()
+        # output = model(images)
+        # loss = criterion(output, target)
+        # gpu_time.add(time.time() - model_start)
+        # gpu_time.update()
+        #
+        # # measure accuracy and record loss
+        # acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        # losses.update(loss.item(), images.size(0))
+        # top1.update(acc1[0], images.size(0))
+        # top5.update(acc5[0], images.size(0))
 
         # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # backward_start = time.time()
+        # optimizer.zero_grad()
+        # loss.backward()
+        # optimizer.step()
+        # backward_time.update(time.time() - backward_start)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if args.gpu == 0:
-            images_speed.update(images.size(0) * args.world_size)
-            if (i + 1) % 1 == 0:
-                print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
-                images_speed.reset()
-        # print(str(images_speed))
+        # dataload_time.update()
+        # transform_time.update()
 
-        if args.gpu == 0 and args.track_cache_usage:
-            track_cache_usage(i)
+        # if args.gpu == 0:
+        #     images_speed.update(images.size(0) * args.world_size)
+        #     # if (i + 1) % 8 == 0:
+        #     # if i % args.print_freq == 0:
+        #     print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
+        #     images_speed.reset()
+        #
+        # if args.gpu == 0 and args.track_cache_usage:
+        #     track_cache_usage(i)
 
         if i % args.print_freq == 0:
             progress.display(i)
@@ -469,72 +536,6 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
-
-
-class SpeedMeter(object):
-    """"Computes and store the speed of some process"""
-
-    def __init__(self, name, fmt=':f'):
-        self.name = name
-        self.fmt = fmt
-        self.start_time = time.time()
-        self.sum = 0
-        self.speed = 0
-
-    def reset(self):
-        self.sum = 0
-        self.start_time = time.time()
-        self.speed = 0
-
-    def update(self, val):
-        self.sum += val
-        self.speed = self.sum / (time.time() - self.start_time)
-
-    def __str__(self):
-        fmtstr = '{name} {speed' + self.fmt + '}'
-        return fmtstr.format(**self.__dict__)
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self, name, fmt=':f'):
-        self.name = name
-        self.fmt = fmt
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
-        return fmtstr.format(**self.__dict__)
-
-
-class ProgressMeter(object):
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters = meters
-        self.prefix = prefix
-
-    def display(self, batch):
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches // 1))
-        fmt = '{:' + str(num_digits) + 'd}'
-        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 
 def adjust_learning_rate(optimizer, epoch, args):
