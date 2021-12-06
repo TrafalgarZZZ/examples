@@ -4,6 +4,7 @@ import random
 import shutil
 import time
 import warnings
+from typing import Optional, Callable, Any, Iterable, Mapping
 
 from tqdm import tqdm
 import torch
@@ -80,13 +81,11 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--track-cache-usage', action='store_true', help='to enable track cache usage')
-
-parser.add_argument('--server-host', default='127.0.0.1', type=str, help='server host')
+# parser.add_argument('--server-host', default='127.0.0.1', type=str, help='server host')
 best_acc1 = 0
 
-args = parser.parse_args()
-
-server_host = args.server_host
+server_host = "127.0.0.1"
+# server_host = "172.16.0.83"
 port = 7890
 
 uuid = os.environ["JOB_UUID"]
@@ -100,28 +99,47 @@ print(register_response)
 
 example_paths = []
 idx = 0
+aggregation = -1
 
-# reader_batch_size = int(args.batch_size / torch.cuda.device_count())
-reader_batch_size = 16
+args = parser.parse_args()
+reader_batch_size = int(args.batch_size / torch.cuda.device_count())
+
+# import threading
+
+# class SpeedProfilerThread(threading.Thread):
+#
+#     def __init__(self) -> None:
+#         threading.Thread.__init__(self)
+#         # super().__init__(self, group=None)
+#
+#     def run(self) -> None:
+#         global aggregation
+#         global idx
+#         start_time = time.time()
+#         while True:
+#             now = time.time()
+#             print(">>>>> Processed %d images, time: %f" % (aggregation * reader_batch_size + idx, now - start_time))
+#             time.sleep(1)
+
 
 def path_reader(uuid):
     global example_paths
     global idx
+    global aggregation
 
     if example_paths is None or len(example_paths[idx:]) == 0:
-        start_time = time.time()
+        start_time = int(time.time() * 1000)
         example_req = example_meta_pb2.ExampleRequest(num=reader_batch_size, worker_rank=0, uuid=uuid)
-        example_paths = []
-        for exampleMeta in stub.FetchExample(example_req):
-            arr = exampleMeta.filepath.split('/')
-            example_paths.append(os.path.join(arr[-2], arr[-1]))
-        # example_paths = [exampleMeta.filepath.lstrip('/openimages/data/') for exampleMeta in stub.FetchExample(example_req)]
+        example_paths = [exampleMeta.filepath.lstrip('/') for exampleMeta in stub.FetchExample(example_req)]
         idx = 0
-        # print("rpc took %d" % (time.time() - start_time))
+        aggregation += 1
+        end_time = int(time.time() * 1000)
+        print("rpc took %d ms" % (end_time - start_time))
 
     ret = example_paths[idx]
     idx += 1
-    return os.path.join('/data/train', ret)
+    return os.path.join('/data/', ret)
+
 
 default_path_reader = path_reader
 
@@ -138,7 +156,6 @@ class ImageNetDataset(datasets.RemoteImageFolder):
 
 
 def main():
-
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -157,6 +174,9 @@ def main():
         args.world_size = int(os.environ["WORLD_SIZE"])
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+
+    # profileThread = SpeedProfilerThread()
+    # profileThread.start()
 
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
@@ -314,7 +334,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, epoch, args, start_train_time)
         print("Training time:", time.time() - start_train_time)
 
         # evaluate on validation set
@@ -334,10 +354,15 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer': optimizer.state_dict(),
             }, is_best)
 
+
 def track_cache_usage(i):
     p = Popen(['bash', '/logs/log_collector.sh', str(i)])
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+
+def train(train_loader, model, criterion, optimizer, epoch, args, start_train_time):
+    ngpus_per_node = torch.cuda.device_count()
+
+    images_speed = SpeedMeter('Images/sec', ':6.3f')
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -380,6 +405,13 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+
+        if args.gpu == 0:
+            images_speed.update(images.size(0) * args.world_size)
+            if (i + 1) % 1 == 0:
+                print("GPU[%d]: %s \t %.2f" % (args.gpu, str(images_speed), time.time() - start_train_time))
+                images_speed.reset()
+        # print(str(images_speed))
 
         if args.gpu == 0 and args.track_cache_usage:
             track_cache_usage(i)
@@ -437,6 +469,30 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
+
+class SpeedMeter(object):
+    """"Computes and store the speed of some process"""
+
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.start_time = time.time()
+        self.sum = 0
+        self.speed = 0
+
+    def reset(self):
+        self.sum = 0
+        self.start_time = time.time()
+        self.speed = 0
+
+    def update(self, val):
+        self.sum += val
+        self.speed = self.sum / (time.time() - self.start_time)
+
+    def __str__(self):
+        fmtstr = '{name} {speed' + self.fmt + '}'
+        return fmtstr.format(**self.__dict__)
 
 
 class AverageMeter(object):
