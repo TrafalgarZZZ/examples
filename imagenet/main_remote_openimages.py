@@ -81,9 +81,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--track-cache-usage', action='store_true', help='to enable track cache usage')
 
-parser.add_argument('--server-host', default='127.0.0.1', type=str, help='server host')
-best_acc1 = 0
+parser.add_argument('--server-host', default='127.0.0.1', type=str, help='dataset server host')
 
+best_acc1 = 0
 args = parser.parse_args()
 
 server_host = args.server_host
@@ -318,7 +318,8 @@ def main_worker(gpu, ngpus_per_node, args):
         print("Training time:", time.time() - start_train_time)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        #acc1 = validate(val_loader, model, criterion, args)
+        acc1 = 0.0
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1

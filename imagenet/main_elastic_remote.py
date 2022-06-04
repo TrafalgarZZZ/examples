@@ -67,7 +67,7 @@ import torchvision.transforms as transforms
 from torch.nn.parallel import DistributedDataParallel
 from torch.optim import SGD
 from torch.utils.data import DataLoader
-from torch
+from torchelastic.utils.data import ElasticDistributedSampler
 
 import grpc
 from subprocess import Popen
@@ -207,10 +207,16 @@ class ImageNetDataset(datasets.RemoteImageFolder):
 
 
 def main():
+    print("Starting main...")
+    global channel
+    global stub
     # args = parser.parse_args()
     device_id = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(device_id)
     print(f"=> set cuda device = {device_id}")
+
+    channel = grpc.insecure_channel(server_address)
+    stub = example_meta_pb2_grpc.DatasetServiceStub(channel)
 
     dist.init_process_group(
         backend=args.dist_backend, init_method="env://", timeout=timedelta(seconds=10)
@@ -353,6 +359,7 @@ def initialize_data_loader(
                 normalize,
             ]
         ),
+        uuid=uuid,
     )
     train_sampler = ElasticDistributedSampler(train_dataset)
     train_loader = DataLoader(
